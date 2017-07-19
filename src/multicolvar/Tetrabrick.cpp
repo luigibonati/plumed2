@@ -33,9 +33,26 @@ using namespace std;
 namespace PLMD{
 namespace multicolvar{
 
-//+PLUMEDOC MCOLVAR TETRAHEDRAL ORDER PARAMETER 
+//+PLUMEDOC MCOLVAR TETRAHEDRAL ORDER PARAMETER
 /*
-Work in progress...
+Calculate the degree of tethaedrality around a central atom, by computing the order parameter proposed by: 
+'A new order parameter for tetrahedral configurations' (Chau, Hardwick, Molecular Physics 1998)
+rescaled as done in 'Relationship between structural order and the anomalies of liquid water' (Errington, Debenedetti, Nature 2001).
+
+\f[
+s = 1 - \frac{3}{32} \sum_{i=0} ^{N-1} \sum_{j=i+1} ^{N} (\cos(\theta_{ikj}+1/3))^2
+\f]
+
+Then you can calculate functions of the distribution of this local tethraedral order parameter such as
+the mean, minimum, the number less than a certain quantity and so on.
+
+\par Examples
+
+The following input tells plumed to calculate the tethraedral paramter of atoms 1-100 with themselves.
+The mean of these parameter is then calculated:
+\verbatim
+tb: TETRABRICK SPECIES=1-216 D_0=0.25 R_0=0.05 MEAN
+\endverbatim
 
 */
 //+ENDPLUMEDOC
@@ -50,7 +67,7 @@ public:
   static void registerKeywords( Keywords& keys );
   explicit Tetrabrick(const ActionOptions&);
 // active methods:
-  virtual double compute( const unsigned& tindex, AtomValuePack& myatoms ) const ; 
+  virtual double compute( const unsigned& tindex, AtomValuePack& myatoms ) const ;
 /// Returns the number of coordinates of the field
   bool isPeriodic(){ return false; }
 };
@@ -70,7 +87,7 @@ void Tetrabrick::registerKeywords( Keywords& keys ){
   // Use actionWithDistributionKeywords
   keys.use("MEAN"); keys.use("MORE_THAN"); keys.use("LESS_THAN"); keys.use("MAX");
   keys.use("MIN"); keys.use("BETWEEN"); keys.use("HISTOGRAM"); keys.use("MOMENTS");
-  keys.use("ALT_MIN"); keys.use("LOWEST"); keys.use("HIGHEST"); 
+  keys.use("ALT_MIN"); keys.use("LOWEST"); keys.use("HIGHEST");
 }
 
 Tetrabrick::Tetrabrick(const ActionOptions&ao):
@@ -82,7 +99,7 @@ MultiColvarBase(ao)
   if(sw.length()>0){
      switchingFunction.set(sw,errors);
      if( errors.length()!=0 ) error("problem reading SWITCH keyword : " + errors );
-  } else { 
+  } else {
      double r_0=-1.0, d_0; int nn, mm;
      parse("NN",nn); parse("MM",mm);
      parse("R_0",r_0); parse("D_0",d_0);
@@ -100,44 +117,206 @@ MultiColvarBase(ao)
 
 double Tetrabrick::compute( const unsigned& tindex, AtomValuePack& myatoms ) const {
    // --- Calculate the tetrahedral order parameter ---
-   
+
    // Define output quantities
    double tetra=0;
    vector<Vector> deriv(getNumberOfAtoms());
    Tensor virial;
    // Define temp quantities
    double d2i, d2j;								//square distances
-   double cos; 									//cosine term
+   double di_mod, dj_mod;						//modulo of distances
+   double di_inv, dj_inv;						//inverse of distances
+   double cos, cos2, versors; 							//cosine term, and squared version, and scalar product between versors
    double sw_i, sw_j, df_i, df_j;				//switch functions and derivatives
-   
+   double prefactor;							//prefactor of the derivative of the cosine part 
+   Vector der_sw_i, der_sw_j;					//switch derivative parts
+   Vector der_i, der_j;							//derivatives i and j
+
    // Loop on nearest neighbors and load distances di and dj
+
    for(unsigned i=1;i<(myatoms.getNumberOfAtoms()-1);++i){
       Vector& di=myatoms.getPosition(i); 		//relative position of atom i (with respect to k)
-      if ( (d2i=di[0]*di[0])<rcut2 && 
+      if ( (d2i=di[0]*di[0])<rcut2 &&
            (d2i+=di[1]*di[1])<rcut2 &&
            (d2i+=di[2]*di[2])<rcut2) {
          for(unsigned j=i+1;j<myatoms.getNumberOfAtoms();++j){
-            Vector& dj=myatoms.getPosition(j); 	//relative position of atom j (with respect to k)  
-            if ( (d2j=dj[0]*dj[0])<rcut2 && 
+            Vector& dj=myatoms.getPosition(j); 	//relative position of atom j (with respect to k)
+            if ( (d2j=dj[0]*dj[0])<rcut2 &&
                  (d2j+=dj[1]*dj[1])<rcut2 &&
                  (d2j+=dj[2]*dj[2])<rcut2) {
-			// compute cosine term	
-			cos = (di[0]*dj[0]+di[1]*dj[1]+di[2]*dj[2])/(sqrt(d2i)*sqrt(d2j)) +1./3.;
-			// compute switching functions
+					 
+			// -- (1) COMPUTE --
+			// useful terms
+			di_mod=sqrt(d2i);
+			dj_mod=sqrt(d2j);
+			di_inv=1./di_mod;
+			dj_inv=1./dj_mod;
+			// cosine term
+			versors = dotProduct( di,dj )/( di_mod * dj_mod );
+			cos = versors + 1./3.;
+			cos2 = cos*cos;
+			// compute switching functions (derivatives return der/dist)
 			sw_i = switchingFunction.calculateSqr( d2i, df_i );
 			sw_j = switchingFunction.calculateSqr( d2j, df_j );
+			// order parameter (relative to ikj triplet)
+            tetra += cos2*sw_i*sw_j;
 
-            tetra += cos*cos*sw_i*sw_j;
+			// -- (2) DERIVATE --
+			// useful terms
+			der_sw_i = di * df_i * sw_j * cos2;		// sw part relative to i derivative
+			der_sw_j = sw_i * dj * df_j * cos2;		// sw part relative to j derivative
+			prefactor = 2*sw_i*sw_j*cos;			// der prefactor
+      
+			//deriv[0] -= der_sw_i + prefactor * ( di_inv*dj_inv - versors/d2i) * di + der_sw_j + prefactor * ( di_inv*dj_inv - versors/d2j) * dj;
+			der_i = der_sw_i + prefactor * ( di_inv*dj_inv * dj - (versors/d2i)* di);
+			der_j = der_sw_j + prefactor * ( di_inv*dj_inv * di - (versors/d2j)* dj);
+			
+			deriv[i] += der_i;	
+			deriv[j] += der_j;	
+			
+			// -- (3) VIRIAL --
+			 myatoms.addBoxDerivatives( 1, -(Tensor(di,-3./8.*der_i)+Tensor(dj,-3./8.*der_j)) );		
 			}
          }
       }
    }
+
+/* OLD VERSION!
+   for(unsigned i=1;i<(myatoms.getNumberOfAtoms()-1);++i){
+      Vector& di=myatoms.getPosition(i); 		//relative position of atom i (with respect to k)
+      if ( (d2i=di[0]*di[0])<rcut2 &&
+           (d2i+=di[1]*di[1])<rcut2 &&
+           (d2i+=di[2]*di[2])<rcut2) {
+         for(unsigned j=i+1;j<myatoms.getNumberOfAtoms();++j){
+            Vector& dj=myatoms.getPosition(j); 	//relative position of atom j (with respect to k)
+            if ( (d2j=dj[0]*dj[0])<rcut2 &&
+                 (d2j+=dj[1]*dj[1])<rcut2 &&
+                 (d2j+=dj[2]*dj[2])<rcut2) {
+
+			// -- (1) COMPUTE --
+			// useful terms
+			di_mod=sqrt(d2i);
+			dj_mod=sqrt(d2j);
+			di_inv=1./di_mod;
+			dj_inv=1./dj_mod;
+			// cosine term
+			cos = dotProduct( di,dj )/( di_mod * dj_mod ) +1./3.;
+			cos2=cos*cos;
+			// order parameter (relative to ikj triplet)
+            tetra += cos2;
+
+			// -- (2) DERIVATE --
+			// useful terms
+			prefactor = 2*cos;			// der prefactor
+      
+			for(unsigned k=0;k<3;++k){
+				c_i[k] = ( di[k]*di[k] * di_inv*di_inv -1)*di_inv *dj[k]*dj_inv; //!!!
+				c_j[k] = ( dj[k]*dj[k] * dj_inv*dj_inv -1)*dj_inv *di[k]*di_inv;
+			}
+			// central atom
+			deriv[0] += prefactor *(c_i + c_j); 		//derivative with respect to central atom has a minus in both the sw terms
+			deriv[i] -= prefactor * c_i;							//the derivative part of the cosine has a minus with respect to the central one
+			deriv[j] -= prefactor * c_j;				
+			
+			// -- (3) VIRIAL --
+			//Tensor vv(value, distance);	
+			//myatoms.addBoxDerivatives( 1, virial );		
+			}
+         }
+      }
+   }
+*/
+/*   DOUBLE SUM WITH SWs
+ * 	for(unsigned i=1;i<(myatoms.getNumberOfAtoms()-1);++i){
+      Vector& di=myatoms.getPosition(i); 		//relative position of atom i (with respect to k)
+      if ( (d2i=di[0]*di[0])<rcut2 &&
+           (d2i+=di[1]*di[1])<rcut2 &&
+           (d2i+=di[2]*di[2])<rcut2) {
+         for(unsigned j=i+1;j<myatoms.getNumberOfAtoms();++j){
+            Vector& dj=myatoms.getPosition(j); 	//relative position of atom j (with respect to k)
+            if ( (d2j=dj[0]*dj[0])<rcut2 &&
+                 (d2j+=dj[1]*dj[1])<rcut2 &&
+                 (d2j+=dj[2]*dj[2])<rcut2) {
+
+			// -- (1) COMPUTE --
+			// useful terms
+			di_mod=sqrt(d2i);
+			dj_mod=sqrt(d2j);
+			di_inv=1./di_mod;
+			dj_inv=1./dj_mod;
+			// cosine term
+			cos = dotProduct( di,dj )/( di_mod * dj_mod ) +1./3.;
+			cos2=cos*cos;
+			// compute switching functions (derivatives return der/dist)
+			sw_i = switchingFunction.calculateSqr( d2i, df_i );
+			sw_j = switchingFunction.calculateSqr( d2j, df_j );
+			// order parameter (relative to ikj triplet)
+            tetra += sw_i*sw_j;
+
+			// -- (2) DERIVATE --
+			// useful terms
+			der_sw_i = di * df_i * sw_j ;		// sw part relative to i derivative
+			der_sw_j = sw_i * dj * df_j ;		// sw part relative to j derivative
+			prefactor = 2*sw_i*sw_j*cos;		// der prefactor
+      
+			for(unsigned k=0;k<3;++k){
+				c_i[k] = ( di[k]*di[k] * di_inv*di_inv -1)*di_inv *dj[k];
+				c_j[k] = ( dj[k]*dj[k] * dj_inv*dj_inv -1)*dj_inv *di[k];
+			}
+			// central atom
+			deriv[0] -= der_sw_i + der_sw_j; 		//derivative with respect to central atom has a minus in both the sw terms
+			deriv[i] += der_sw_i;							//the derivative part of the cosine has a minus with respect to the central one
+			deriv[j] += der_sw_j;				
+			
+			// -- (3) VIRIAL --
+			//Tensor vv(value, distance);	
+			//myatoms.addBoxDerivatives( 1, virial );		
+			}
+         }
+      }
+   }
+*/
+/*	COORDINATION NUMBER
+ * for(unsigned i=1;i<(myatoms.getNumberOfAtoms()-1);++i){
+      Vector& di=myatoms.getPosition(i); 		//relative position of atom i (with respect to k)
+      if ( (d2i=di[0]*di[0])<rcut2 &&
+           (d2i+=di[1]*di[1])<rcut2 &&
+           (d2i+=di[2]*di[2])<rcut2) {
+        
+			// -- (1) COMPUTE --
+
+			// compute switching functions (derivatives return der/dist)
+			sw_i = switchingFunction.calculateSqr( d2i, df_i );
+			// order parameter (relative to ikj triplet)
+            tetra += sw_i;
+
+			// -- (2) DERIVATE --
+			// useful terms
+			der_sw_i = di * df_i ;		// sw part relative to i derivative
+      
+			// central atom
+			deriv[0] -= der_sw_i; 		//derivative with respect to central atom has a minus in both the sw terms
+			deriv[i] += der_sw_i;		//the derivative part of the cosine has a minus with respect to the central one	
+
+      }
+   }
+*/
+
+   // output quantities
+   tetra = 1 - 3./8.*tetra;
+
+   // Assign derivatives
+   for(unsigned i=0;i<myatoms.getNumberOfAtoms();++i){
+	  deriv[0]+=3./8.*deriv[i];
+	  addAtomDerivatives(1,i,-3./8.*deriv[i],myatoms);
+   }
+   addAtomDerivatives(1,0,deriv[0],myatoms);
    
-   tetra=1 - 3./8.*tetra; 
-   cout << tetra << endl;
+   // Assign virial	
+   //myatoms.addBoxDerivatives( 1, virial );
+   
    return tetra;
 }
 
 }
 }
-
