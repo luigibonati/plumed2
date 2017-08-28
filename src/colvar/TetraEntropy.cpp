@@ -38,7 +38,21 @@ namespace colvar{
 //+PLUMEDOC COLVAR TETRAENTROPY
 /*
 
-still missing
+Tetrahedral entropy, defined starting from the tetrahedral order parameter, according to reference XXX.
+
+\par Examples
+
+Usage:
+\verbatim
+TETRAENTROPY ...
+GROUPA=1-216
+LABEL=sq
+SWITCH={RATIONAL D_0=0.25 R_0=0.05 D_MAX=0.32}
+NLIST
+NL_CUTOFF=0.4
+NL_STRIDE=10
+... TETRAENTROPY
+\endverbatim
 
 */
 //+ENDPLUMEDOC
@@ -276,6 +290,7 @@ void TetraEntropy::calculate()
 
             if (!doNotCalculateDerivatives()) {
               // -- (2) DERIVATE --
+
               // useful terms
               der_sw_i = di * df_i * sw_j * cos2;		// sw part relative to i derivative
               der_sw_j = sw_i * dj * df_j * cos2;		// sw part relative to j derivative
@@ -303,15 +318,27 @@ void TetraEntropy::calculate()
   }
 
   for(unsigned int k=0;k<NumberOfAtoms;++k){
-    // tetrahedral entropy
-    tetra_entropy += std::log(3./8. * tetra[k]);
 
-    // derivatives (note: the prefactor 3/8 simplifies between tetra and deriv)
-    for(unsigned int l=0;l<NumberOfAtoms;++l)
-      deriv_sum[k] += deriv[l][k]/tetra[l];
+    if(tetra[k]>1e-12){
+      //check: if the arrangement is exactly tetrahedral:
+        // 1) avoid the logarithm divergence in the CV
+        // 2) set to zero the derivatives
+      // tetrahedral entropy
+      tetra_entropy += std::log(3./8. * tetra[k]);
 
-    // virial (same thing with the prefactor)
-    virial_sum += virial[k]/(tetra[k]);
+      // derivatives (note: the prefactor 3/8 simplifies between tetra and deriv)
+      for(unsigned int l=0;l<NumberOfAtoms;++l){
+        //check: if the arrangement is exactly tetrahedral, set to zero the derivatives
+        if(tetra[l]>1e-12)
+          deriv_sum[k] += deriv[l][k]/tetra[l];
+      }
+
+      // virial (same thing with the prefactor)
+      virial_sum += virial[k]/(tetra[k]);
+    }
+    else {
+      tetra_entropy += std::log(1e-12);
+    }
   }
 
   tetra_entropy = 3./(2.*NumberOfAtoms) * tetra_entropy;
